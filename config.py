@@ -30,9 +30,9 @@
 import os
 from datetime import datetime
 from string import Template
-import config_rc as RC, config_cva6 as CVA6, config_boomv3 as BOOMV3, config_boomv4 as BOOMV4 
+import config_rc as RC, config_cva6 as CVA6, config_boomv3 as BOOMV3, config_boomv4 as BOOMV4, config_coral as CORAL
 import config_spike as SPIKE, config_spike_csr as SPIKE_CSR
-import rc_inst_list, cva6_inst_list, boomv3_inst_list, boomv4_inst_list
+import rc_inst_list, cva6_inst_list, boomv3_inst_list, boomv4_inst_list, coral_inst_list
 from riscv_isa import inst_isa
 
 import warnings
@@ -52,7 +52,7 @@ warnings.filterwarnings("ignore", category=SyntaxWarning)
 """
 
 argVars = {}
-argVars['core_name']        = {'s' : 'co' , 'v' : 'rc', 'c' : ['rc', 'cva6', 'boomv3', 'boomv4'], 'h' : "select core(benchmark) to fuzz"}
+argVars['core_name']        = {'s' : 'co' , 'v' : 'rc', 'c' : ['rc', 'cva6', 'boomv3', 'boomv4', 'coral'], 'h' : "select core(benchmark) to fuzz"}
 argVars['run_id']           = {'s' : 'id' , 'v' : f"{datetime.now().strftime('%y_%m_%d_%H_%M_%S')}",  'c' : None, 'h' : "select run name to store results (uses current time by default)"}
 argVars['run_mode']         = {'s' : 'rm' , 'v' : 'thehuzz','c' : ['thehuzz', 'mabfuzz', 'psofuzz', 'random'], 'h' : "select whether running TheHuzz profiling, TheHuzz fuzzer, mab fuzzer, pso fuzzer or random fuzzing"}
 argVars['run_task']         = {'s' : 'rt' , 'v' : 'fuzz',   'c' : ['fuzz', 'check_mismatches', 'update_excel', 'plot_graph'], 'h' : "runs normally if fuzz is selected. rest of the options are subtasks that run corresponding task and quit"}
@@ -139,6 +139,8 @@ def CORE():
         CORE_local = BOOMV3
     elif core_name == 'boomv4':
         CORE_local = BOOMV4
+    elif core_name == 'coral':
+        CORE_local = CORAL
     else: 
         assert False, f"unknown core:{core_name} encountered"
     assert core_name == CORE_local.core_name, f"incorrect core config file imported, {core_name}, {CORE_local.core_name}"
@@ -156,6 +158,8 @@ def core_instance_list():
         core_instance_list_local = boomv3_inst_list.l
     elif core_name == 'boomv4':
         core_instance_list_local = boomv4_inst_list.l
+    elif core_name == 'coral':
+        core_instance_list_local = coral_inst_list.l
     else: 
         assert False, f"unknown core:{core_name} encountered"
 
