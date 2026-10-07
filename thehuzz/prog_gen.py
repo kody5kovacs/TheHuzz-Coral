@@ -61,6 +61,11 @@ def gen_random_prog(file_p, num_inst_in_prog, opcode_list, inst_list_all_w_ext\
     
     #write to file
     write_c_frame_start(file_p, num_nops_at_start, core=core, mode='random')
+    #RVV: vtype resets to vill, so every vector inst traps until a vsetvli runs.
+    #first_opcode_list is picked at random, so it cannot be relied on to put one
+    #first. emit it unconditionally whenever vector insts are in the pool.
+    if any(inst_list_all_w_ext[o][1].startswith('v') for o in opcode_list):
+        write_asm(vec_prologue_inst(fixed=True), file_p)
     
     #create instructions
     for j in range(num_inst_in_prog):
@@ -84,6 +89,11 @@ def gen_fuzzer_prog(file_p, num_inst_in_prog, opcode_list, inst_list_all_w_ext\
                     , core, mode):
     #write to file
     write_c_frame_start(file_p, num_nops_at_start, mode=mode, core=core)
+    #RVV: vtype resets to vill, so every vector inst traps until a vsetvli runs.
+    #first_opcode_list is picked at random, so it cannot be relied on to put one
+    #first. emit it unconditionally whenever vector insts are in the pool.
+    if any(inst_list_all_w_ext[o][1].startswith('v') for o in opcode_list):
+        write_asm(vec_prologue_inst(fixed=True), file_p)
     
     # determine the sequence of instructions
     # first half will be simple insts and rest will be all insts
@@ -131,6 +141,145 @@ def  write_c_frame_end(f_inst, num_nops_at_end):
     f_inst.write(line + "\n")
     
 
+#---------------------------------------------------------------------------
+# RVV (Zve32x) operand generation
+#---------------------------------------------------------------------------
+# vtype fields that are legal to encode. an illegal SEW/LMUL combination sets
+# vill and makes every following vector inst trap, which is a legitimate fuzz
+# target, but it is NOT something the assembler will reject - it assembles fine
+# and fails at run time. keep the illegal combos here if you want them.
+VEC_SEW  = ['e8', 'e16', 'e32']
+VEC_LMUL = ['mf8', 'mf4', 'mf2', 'm1', 'm2', 'm4', 'm8']
+VEC_TA   = ['ta', 'tu']
+VEC_MA   = ['ma', 'mu']
+
+def _vreg(align=1):
+    #align: whole-register insts require vd/vs2 to be a multiple of nr, and GAS
+    #       rejects a misaligned one at assemble time
+    return "v" + str(random.randrange(0, 32, align))
+
+def _xreg():
+    return "x" + str(random.randint(0,31))
+
+def _vimm():
+    # .vi forms are signed 5-bit on some insts (vadd.vi: -16..15) and unsigned
+    # 5-bit on others (vsll.vi, vrgather.vi, vnclip.wi: 0..31). 0..15 is the
+    # intersection, so it assembles for every .vi inst in the table.
+    return str(random.randint(0,15))
+
+def _vtypei():
+    return (random.choice(VEC_SEW) + "," + random.choice(VEC_LMUL) + ","
+            + random.choice(VEC_TA) + "," + random.choice(VEC_MA))
+
+def _vm():
+    # ", v0.t" makes the inst masked (vm=0). half the time, unmasked.
+    return random.choice(["", ", v0.t"])
+
+def _nr_from_name(inst_op):
+    # VMV2R.V -> 2, VL4RE16.V -> 4, VS8R.V -> 8
+    m = re.match(r'^VMV(\d)R\.V$|^VL(\d)RE\d+\.V$|^VS(\d)R\.V$', inst_op)
+    if not m:
+        return 1
+    return int([g for g in m.groups() if g][0])
+
+
+#create a vector instruction operand string
+#input:  inst_op  - mnemonic as it appears in riscv_isa.rvv (upper case)
+#        i_type   - format token, field 1 of the rvv dict entry
+#output: full assembly string, or None if the format token is unknown
+def create_vec_inst(inst_op, i_type):
+    nr = _nr_from_name(inst_op)
+
+    #--- configuration ---
+    if i_type == 'vcfg':                                    #vsetvli rd, rs1, vtypei
+        return inst_op + " " + _xreg() + "," + _xreg() + "," + _vtypei()
+    if i_type == 'vcfgi':                                   #vsetivli rd, uimm, vtypei
+        return inst_op + " " + _xreg() + "," + str(random.randint(0,31)) + "," + _vtypei()
+    if i_type == 'vcfgr':                                   #vsetvl rd, rs1, rs2
+        return inst_op + " " + _xreg() + "," + _xreg() + "," + _xreg()
+
+    #--- OP-V arithmetic, maskable ---
+    if i_type == 'vvv':                                     #vd, vs2, vs1, vm
+        return inst_op + " " + _vreg() + "," + _vreg() + "," + _vreg() + _vm()
+    if i_type == 'vvx':                                     #vd, vs2, rs1, vm
+        return inst_op + " " + _vreg() + "," + _vreg() + "," + _xreg() + _vm()
+    if i_type == 'vxv':                                     #vd, rs1, vs2, vm (vmacc/vwmacc .vx)
+        return inst_op + " " + _vreg() + "," + _xreg() + "," + _vreg() + _vm()
+    if i_type == 'vvi':                                     #vd, vs2, imm, vm
+        return inst_op + " " + _vreg() + "," + _vreg() + "," + _vimm() + _vm()
+
+    #--- OP-V arithmetic, vm hardwired to 1 (no mask operand allowed) ---
+    if i_type == 'vvvn':
+        return inst_op + " " + _vreg() + "," + _vreg() + "," + _vreg()
+    if i_type == 'vvxn':
+        return inst_op + " " + _vreg() + "," + _vreg() + "," + _xreg()
+    if i_type == 'vvin':
+        return inst_op + " " + _vreg() + "," + _vreg() + "," + _vimm()
+
+    #--- carry/borrow and merge: v0 is an explicit operand, vm must be 0 ---
+    if i_type == 'vvvm':
+        return inst_op + " " + _vreg() + "," + _vreg() + "," + _vreg() + ",v0"
+    if i_type == 'vvxm':
+        return inst_op + " " + _vreg() + "," + _vreg() + "," + _xreg() + ",v0"
+    if i_type == 'vvim':
+        return inst_op + " " + _vreg() + "," + _vreg() + "," + _vimm() + ",v0"
+
+    #--- whole-vector move (2 operands, vm hardwired to 1) ---
+    if i_type == 'vmvv':
+        return inst_op + " " + _vreg() + "," + _vreg()
+    if i_type == 'vmvx':
+        return inst_op + " " + _vreg() + "," + _xreg()
+    if i_type == 'vmvi':
+        return inst_op + " " + _vreg() + "," + _vimm()
+
+    #--- loads and stores ---
+    # NOTE: the base address in rs1 is whatever junk happens to be in that
+    # register. that is the same thing the existing 's'/'Loads' paths do, and
+    # it is why LH/LW/SH/SW sit in inst_sim_issue_1.
+    if i_type == 'vld':                                     #vd, (rs1), vm
+        return inst_op + " " + _vreg() + ",(" + _xreg() + ")" + _vm()
+    if i_type == 'vst':                                     #vs3, (rs1), vm
+        return inst_op + " " + _vreg() + ",(" + _xreg() + ")" + _vm()
+    if i_type in ('vlds', 'vsts'):                          #vd, (rs1), rs2, vm
+        return inst_op + " " + _vreg() + ",(" + _xreg() + ")," + _xreg() + _vm()
+    if i_type in ('vldi', 'vsti'):                          #vd, (rs1), vs2, vm
+        return inst_op + " " + _vreg() + ",(" + _xreg() + ")," + _vreg() + _vm()
+    if i_type in ('vldr', 'vstr'):                          #vd, (rs1) - no mask (also vlm.v/vsm.v, nr=1)
+        return inst_op + " " + _vreg(nr) + ",(" + _xreg() + ")"
+
+    #--- mask and permutation ---
+    if i_type == 'vldw':                                    #vd, vs2, vm
+        return inst_op + " " + _vreg() + "," + _vreg() + _vm()
+    if i_type == 'vrd':                                     #rd, vs2, vm
+        return inst_op + " " + _xreg() + "," + _vreg() + _vm()
+    if i_type == 'vmm':                                     #vd, vs2, vs1 - no mask
+        return inst_op + " " + _vreg() + "," + _vreg() + "," + _vreg()
+    if i_type == 'vd1':                                     #vd, vm
+        return inst_op + " " + _vreg() + _vm()
+    if i_type == 'vxs':                                     #rd, vs2
+        return inst_op + " " + _xreg() + "," + _vreg()
+    if i_type == 'vsx':                                     #vd, rs1
+        return inst_op + " " + _vreg() + "," + _xreg()
+    if i_type == 'vwr':                                     #vd, vs2, both aligned to nr
+        return inst_op + " " + _vreg(nr) + "," + _vreg(nr)
+
+    #--- mask pseudo-ops ---
+    if i_type == 'vm1':                                     #vd, vs2
+        return inst_op + " " + _vreg() + "," + _vreg()
+    if i_type == 'vm0':                                     #vd
+        return inst_op + " " + _vreg()
+
+    return None
+
+
+#emit a vsetvli that makes vtype valid, so the vector insts that follow do not
+#all trap on vill. rd != x0 and rs1 == x0 means "set vl to VLMAX".
+def vec_prologue_inst(fixed=True):
+    if fixed:
+        return "VSETVLI x5,x0,e32,m1,ta,ma"
+    return "VSETVLI " + _xreg() + ",x0," + _vtypei()
+
+
 #create instruction
 #output: instruction string
 def create_inst(inst_op, inst_data, core, f_inst=None, run_type ='fuzz', src1='NONE'):
@@ -138,6 +287,15 @@ def create_inst(inst_op, inst_data, core, f_inst=None, run_type ='fuzz', src1='N
     key = inst_data[0]
     inst = inst_op
     i_type = inst_data[1]
+
+    #RVV: every vector format token starts with 'v'. handle them separately,
+    #the scalar operand code below does not know about vector registers.
+    if i_type.startswith('v'):
+        vec_inst = create_vec_inst(inst_op, i_type)
+        if vec_inst is None:
+            print("ERROR: unknown vector format type:", i_type, "for", inst_op)
+            exit()
+        return vec_inst
 
     if i_type == 'r': 
         dest = "x" + str(random.randint(0,31))

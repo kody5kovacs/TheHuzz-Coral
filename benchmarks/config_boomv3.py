@@ -71,6 +71,7 @@ tot_sim_time = time_per_inst * max_sim_instr
 inst_isa = { "rv32i": 1, "rv64i": 1
             ,"rv32m": 1, "rv64m": 1
             ,"rv32a": 1, "rv64a": 1
+            ,"rvv": 0
         }
 
 #cov_sizes = {'line': 13384, 'branch': 15780, 'cond': 12140, 'fsm': 434, 'tgl': 642406}
